@@ -1,9 +1,9 @@
 {
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
-    "name": "impart GUI for KiCad",
+    "name": "impart GUI for KiCad (ahmadtak-3212 fork)",
     "description": "Import library files from Octopart, Samacsys, Ultralibrarian, Snapeda and EasyEDA",
-    "description_full": "Import library files from Octopart, Samacsys, Ultralibrarian, Snapeda and EasyEDA.\n For usage and correct setup please read the Readme: \n https://github.com/Steffen-W/Import-LIB-KiCad-Plugin#use-of-the-application",
-    "identifier": "com.github.Steffen-W.impartGUI",
+    "description_full": "Import library files from Octopart, Samacsys, Ultralibrarian, Snapeda and EasyEDA.\n For usage and correct setup please read the Readme: \n https://github.com/ahmadtak-3212/Import-LIB-KiCad-Plugin#use-of-the-application\n Fork of https://github.com/Steffen-W/Import-LIB-KiCad-Plugin",
+    "identifier": "com.github.ahmadtak-3212.impartGUI",
     "type": "plugin",
     "author": {
         "name": "Steffen Wittemeier",
@@ -12,14 +12,14 @@
         }
     },
     "maintainer": {
-        "name": "Steffen Wittemeier",
+        "name": "Ahmad Taka",
         "contact": {
-            "github": "https://github.com/Steffen-W"
+            "github": "https://github.com/ahmadtak-3212"
         }
     },
     "license": "GPL-3.0",
     "resources": {
-        "homepage": "https://github.com/Steffen-W/Import-LIB-KiCad-Plugin"
+        "homepage": "https://github.com/ahmadtak-3212/Import-LIB-KiCad-Plugin"
     },
     "tags": [
         "import",

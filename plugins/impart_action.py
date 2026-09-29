@@ -9,6 +9,7 @@ import atexit
 import hashlib
 import logging
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -247,6 +248,83 @@ class ImpartBackend:
         self.print_to_buffer(info_msg)
         self.print_to_buffer("\n" + "=" * 50 + "\n")
 
+    DEFAULT_LOCAL_LIB_SUBDIR = "libs"
+    LOCAL_LIB_DIR_KEY = "local_lib_dir"
+
+    @staticmethod
+    def _project_section(project_dir: str | Path) -> str:
+        return "project:" + str(Path(project_dir).resolve())
+
+    @staticmethod
+    def _clean_rel(rel: str) -> str | None:
+        """Normalise a project-relative folder; None if it is not relative."""
+        p = Path(rel.strip().replace("\\", "/"))
+        if p.is_absolute() or p.drive:
+            return None
+        return p.as_posix()
+
+    def _lib_table_rel_dir(self, project_dir: str | Path) -> str | None:
+        """Folder already used by this project's lib tables for the imported libraries.
+
+        Looks for a ${KIPRJMOD}-relative entry named like the libraries this plugin
+        writes (the single-library name, else the supported library names).
+        """
+        names = (
+            [self.importer.lib_name] if self.importer.lib_name else self.SUPPORTED_LIBRARIES
+        )
+        for table in ("fp-lib-table", "sym-lib-table"):
+            try:
+                text = (Path(project_dir) / table).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            entries = dict(re.findall(r'\(lib\s+\(name\s+"([^"]+)"\).*?\(uri\s+"([^"]+)"\)', text))
+            for name in names:
+                uri = entries.get(name, "")
+                if uri.startswith("${KIPRJMOD}"):
+                    return self._clean_rel(os.path.dirname(uri[len("${KIPRJMOD}") :].lstrip("/")) or ".")
+        return None
+
+    def local_lib_location(self, project_dir: str | Path) -> tuple[Path, str]:
+        """Folder and KiCad path prefix for local (project) library mode.
+
+        The folder, relative to the project, is the first of:
+          1. the folder picked for this project in the dialog (config section
+             ``project:<path>``, key ``local_lib_dir``);
+          2. the folder this project's lib tables already use for these libraries;
+          3. config key ``local_lib_subdir`` (default ``libs``; ``.`` = project root).
+        Returns e.g. (<project>/../libs, "${KIPRJMOD}/../libs").
+        """
+        rel = self.config.get_value(self.LOCAL_LIB_DIR_KEY, self._project_section(project_dir))
+        rel = self._clean_rel(rel) if rel else None
+        if rel is None:
+            rel = self._lib_table_rel_dir(project_dir)
+        if rel is None:
+            subdir = self.config.get_value("local_lib_subdir")
+            if subdir is None:
+                subdir = self.DEFAULT_LOCAL_LIB_SUBDIR
+                self.config.set_value("local_lib_subdir", subdir)
+            rel = self._clean_rel(subdir)
+            if rel is None:
+                logging.warning(
+                    f"local_lib_subdir '{subdir}' must be relative to the project; "
+                    f"using '{self.DEFAULT_LOCAL_LIB_SUBDIR}'"
+                )
+                rel = self.DEFAULT_LOCAL_LIB_SUBDIR
+
+        if rel in ("", "."):
+            return Path(project_dir), "${KIPRJMOD}"
+        return Path(os.path.normpath(Path(project_dir) / rel)), "${KIPRJMOD}/" + rel
+
+    def set_local_lib_dir(self, project_dir: str | Path, lib_dir: str | Path) -> str:
+        """Remember lib_dir (any folder) for this project, stored relative to it.
+
+        Raises ValueError if lib_dir cannot be expressed relative to the project
+        (e.g. another drive on Windows).
+        """
+        rel = Path(os.path.relpath(Path(lib_dir).resolve(), Path(project_dir).resolve())).as_posix()
+        self.config.set_value(self.LOCAL_LIB_DIR_KEY, rel, self._project_section(project_dir))
+        return rel
+
     def print_to_buffer(self, *args: Any) -> None:
         """Add text to print buffer."""
         for text in args:
@@ -303,8 +381,9 @@ def check_library_import(backend: ImpartBackend, add_if_possible: bool = True) -
             return "\nLocal library mode enabled but no KiCad project available."
 
         try:
-            kicad_settings = KiCad_Settings(str(project_dir), path_prefix="${KIPRJMOD}")
-            dest_path = project_dir
+            lib_dir, path_prefix = backend.local_lib_location(project_dir)
+            kicad_settings = KiCad_Settings(str(project_dir), path_prefix=path_prefix)
+            dest_path = str(lib_dir)
             logging.info("Project-specific library check completed")
         except Exception as e:
             logging.error(f"Failed to read project settings: {e}")
@@ -426,7 +505,7 @@ class ImpartFrontend(impartGUI):
         self.backend.overwrite_import = overwrite_import
         self.backend.auto_lib = auto_lib
         self.backend.local_lib = local_lib
-        self.m_dirPicker_librarypath.Enable(not local_lib)
+        self.m_checkBoxLocalLib.SetLabel("Save local, relative to the project")
 
         single_lib = self.backend.config.get_value("single_lib") == "True"
         lib_name = self.backend.config.get_value("lib_name") or ""
@@ -435,6 +514,7 @@ class ImpartFrontend(impartGUI):
         self.m_textCtrl_libname.Show(single_lib)
         self.Layout()
         self.backend.importer.lib_name = lib_name if single_lib and lib_name else None
+        self._refresh_library_picker()
 
         compress_models_val = self.backend.config.get_value("compress_models")
         compress_models = compress_models_val == "True"  # default False if not set
@@ -494,7 +574,7 @@ class ImpartFrontend(impartGUI):
         src_path = self.backend.config.get_SRC_PATH()
 
         if self.backend.local_lib and self.kicad_project:
-            dest_path = self.kicad_project
+            dest_path = str(self.backend.local_lib_location(self.kicad_project)[0])
             lib_mode = "Local Project Library"
         else:
             dest_path = self.backend.config.get_DEST_PATH()
@@ -511,7 +591,7 @@ class ImpartFrontend(impartGUI):
         """Print path change information."""
         if change_type == "library_mode":
             if self.backend.local_lib and self.kicad_project:
-                dest_path = self.kicad_project
+                dest_path = str(self.backend.local_lib_location(self.kicad_project)[0])
                 lib_mode = "Local Project Library"
             else:
                 dest_path = self.backend.config.get_DEST_PATH()
@@ -522,8 +602,7 @@ class ImpartFrontend(impartGUI):
         elif change_type == "source":
             self.backend.print_to_buffer(f"New Source Directory: {new_value}")
         elif change_type == "destination":
-            if not self.backend.local_lib:
-                self.backend.print_to_buffer(f"New Destination Directory: {new_value}")
+            self.backend.print_to_buffer(f"New Destination Directory: {new_value}")
 
     def _update_button_label(self) -> None:
         """Update the main button label based on current state."""
@@ -531,6 +610,18 @@ class ImpartFrontend(impartGUI):
             self.m_button.Label = "automatic import / press to stop"
         else:
             self.m_button.Label = "Start"
+
+    def _refresh_library_picker(self) -> None:
+        """Show the save location for the current mode: the project's library
+        folder in local mode, the global library folder otherwise."""
+        if self.backend.local_lib:
+            if self.kicad_project:
+                lib_dir = self.backend.local_lib_location(self.kicad_project)[0]
+                self.m_dirPicker_librarypath.SetPath(str(lib_dir))
+            self.m_dirPicker_librarypath.Enable(bool(self.kicad_project))
+        else:
+            self.m_dirPicker_librarypath.SetPath(self.backend.config.get_DEST_PATH())
+            self.m_dirPicker_librarypath.Enable(True)
 
     def update_display(self, status: ResultEvent) -> None:
         """Update the text display with new status."""
@@ -541,7 +632,7 @@ class ImpartFrontend(impartGUI):
         """Handle local library checkbox change."""
         old_local_lib = self.backend.local_lib
         self.backend.local_lib = self.m_checkBoxLocalLib.IsChecked()
-        self.m_dirPicker_librarypath.Enable(not self.backend.local_lib)
+        self._refresh_library_picker()
 
         # Print change information
         if old_local_lib != self.backend.local_lib:
@@ -701,8 +792,9 @@ class ImpartFrontend(impartGUI):
         if self.backend.local_lib:
             if not self.kicad_project:
                 return
-            self.backend.importer.set_DEST_PATH(Path(self.kicad_project))
-            kicad_link = "${KIPRJMOD}"
+            lib_dir, kicad_link = self.backend.local_lib_location(self.kicad_project)
+            lib_dir.mkdir(parents=True, exist_ok=True)
+            self.backend.importer.set_DEST_PATH(lib_dir)
         else:
             dest_path = self.backend.config.get_DEST_PATH()
             if dest_path:
@@ -770,22 +862,32 @@ class ImpartFrontend(impartGUI):
 
     def DirChange(self, event: wx.CommandEvent) -> None:
         """Handle directory path changes."""
-        # Get old values for comparison
         old_src = self.backend.config.get_SRC_PATH()
-        old_dest = self.backend.config.get_DEST_PATH()
-
-        # Update paths
         new_src = self.m_dirPicker_sourcepath.GetPath()
-        new_dest = self.m_dirPicker_librarypath.GetPath()
-
         self.backend.config.set_SRC_PATH(new_src)
-        self.backend.config.set_DEST_PATH(new_dest)
         self.backend.folder_handler.known_files = set()
-
         if old_src != new_src:
             self._print_path_change("source", new_src)
-        if old_dest != new_dest:
-            self._print_path_change("destination", new_dest)
+
+        new_dest = self.m_dirPicker_librarypath.GetPath()
+        if self.backend.local_lib and self.kicad_project:
+            # local mode: the picker selects this project's library folder
+            old_dest = str(self.backend.local_lib_location(self.kicad_project)[0])
+            if os.path.normpath(old_dest) != os.path.normpath(new_dest):
+                try:
+                    rel = self.backend.set_local_lib_dir(self.kicad_project, new_dest)
+                    self._print_path_change("destination", f"{new_dest}  (${{KIPRJMOD}}/{rel})")
+                except ValueError:
+                    self.backend.print_to_buffer(
+                        f"Cannot use {new_dest}: it must be reachable by a relative path "
+                        "from the project folder (same drive)."
+                    )
+                    self._refresh_library_picker()
+        else:
+            old_dest = self.backend.config.get_DEST_PATH()
+            self.backend.config.set_DEST_PATH(new_dest)
+            if old_dest != new_dest:
+                self._print_path_change("destination", new_dest)
 
         event.Skip()
 
@@ -870,8 +972,7 @@ class ImpartFrontend(impartGUI):
                 logging.error(f"KiCad project directory invalid: {self.kicad_project}")
                 return
 
-            path_variable = "${KIPRJMOD}"
-            base_folder = project_path
+            base_folder, path_variable = self.backend.local_lib_location(project_path)
         else:
             path_variable = "${KICAD_3RD_PARTY}"
             base_folder = Path(self.backend.config.get_DEST_PATH())
