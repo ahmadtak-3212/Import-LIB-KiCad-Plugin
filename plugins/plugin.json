@@ -14,8 +14,7 @@
       "description": "impart_action",
       "show-button": true,
       "scopes": [
-        "schematic",
-        "pcb"
+        "schematic"
       ],
       "entrypoint": "impart_action.py",
       "icons-light": [

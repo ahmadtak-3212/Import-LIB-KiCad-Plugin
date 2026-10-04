@@ -119,7 +119,7 @@ class ActionImpartPlugin(pcbnew.ActionPlugin):
     """KiCad Action Plugin for library import using git submodules."""
 
     def defaults(self) -> None:
-        self.name = "impartGUI (fallback pcbnew)"
+        self.name = "impartGUI (fork)"
         self.category = "Import library files"
         self.description = (
             "Import library files from Octopart, Samacsys, Ultralibrarian, Snapeda and EasyEDA"
@@ -188,4 +188,11 @@ class ActionImpartPlugin(pcbnew.ActionPlugin):
             show_error_dialog("Frontend Error", error_msg)
 
 
+# The IPC action (plugin.json) is scoped to the schematic editor only: in KiCad
+# 10.0.5/10.0.6 the PCB editor's IPC buttons stop launching when the schematic
+# editor was opened first. KiCad loads this file as a legacy (SWIG) plugin only
+# when the package sits in a legacy plugin folder (3rdparty/plugins, i.e. a PCM
+# install); it then provides the PCB editor button. A manual install in the IPC
+# folder (<docs>/10.0/plugins) is not loaded as a legacy plugin; there the PCB
+# editor button comes from an external launcher instead.
 ActionImpartPlugin().register()

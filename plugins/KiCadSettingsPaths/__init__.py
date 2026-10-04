@@ -319,14 +319,28 @@ class KiCadApp:
         try:
             from kipy.proto.common.types import DocumentType
 
-            docs = self.kicad_ipc.get_open_documents(DocumentType.DOCTYPE_PCB)
-            doc_type = "PCB"
-            if not docs:
-                docs = self.kicad_ipc.get_open_documents(DocumentType.DOCTYPE_SCHEMATIC)
-                doc_type = "Schematic"
-            if not docs:
+            # Ask per document type: KiCad answers "no handler available" (an error,
+            # not an empty list) for an editor that is not open, so one failed query
+            # must not skip the next.
+            doc, doc_type = None, None
+            for doc_type, kind in (
+                ("PCB", DocumentType.DOCTYPE_PCB),
+                ("Schematic", DocumentType.DOCTYPE_SCHEMATIC),
+            ):
+                try:
+                    docs = self.kicad_ipc.get_open_documents(kind)
+                except Exception as e:
+                    logging.debug(f"IPC: {doc_type} documents unavailable ({e})")
+                    continue
+                if docs:
+                    doc = docs[0]
+                    break
+
+            if doc is None:
                 logging.debug("IPC: no open PCB or Schematic document found, trying proc scan")
-                project_dir = self._find_project_via_process_args()
+                project_dir = (
+                    self._find_project_via_kicad_cwd() or self._find_project_via_process_args()
+                )
                 if project_dir:
                     self.project_info = KiCadProjectInfo(
                         name=project_dir.name, directory=project_dir
@@ -335,12 +349,16 @@ class KiCadApp:
                     self.project_info = KiCadProjectInfo()
                 return
 
-            doc = docs[0]
             project_name = doc.project.name or None
             project_dir = Path(doc.project.path) if doc.project.path else None
             board_filename = (
                 Path(doc.board_filename) if doc_type == "PCB" and doc.board_filename else None
             )
+            if project_dir is None:
+                # KiCad 10's schematic editor reports only the file name, no project.
+                project_dir = self._find_project_via_kicad_cwd(doc.board_filename or None)
+                if project_dir and not project_name:
+                    project_name = project_dir.name
 
             logging.debug(
                 f"IPC: found {doc_type} document - project='{project_name}' path='{project_dir}'"
@@ -360,12 +378,83 @@ class KiCadApp:
                 logging.DEBUG if is_expected else logging.WARNING,
                 f"IPC project info unavailable ({e}), trying process scan",
             )
-            project_dir = self._find_project_via_process_args()
+            project_dir = self._find_project_via_kicad_cwd() or self._find_project_via_process_args()
             self.project_info = (
                 KiCadProjectInfo(name=project_dir.name, directory=project_dir)
                 if project_dir
                 else KiCadProjectInfo()
             )
+
+    @staticmethod
+    def _find_project_via_kicad_cwd(filename: str | None = None) -> Path | None:
+        """Finds the project directory from the working directory of the KiCad process.
+
+        KiCad changes into the project directory when it opens a project, and it
+        starts IPC plugins as child processes. If a KiCad process started the
+        plugin, only that one is used (another open KiCad may hold a different
+        project); other KiCad processes are scanned only when the plugin was not
+        started by KiCad. A directory is accepted only if it contains ``filename``
+        (the document KiCad reported) or, without a filename, a .kicad_pro file.
+        """
+        kicad_names = ("kicad", "eeschema", "pcbnew")
+
+        def _accept(cwd: str | None) -> Path | None:
+            if not cwd:
+                return None
+            d = Path(cwd)
+            try:
+                if filename:
+                    return d if (d / Path(filename).name).is_file() else None
+                return d if next(d.glob("*.kicad_pro"), None) else None
+            except OSError:
+                return None
+
+        def _is_kicad(name: str) -> bool:
+            name = Path(name).stem.lower()
+            return any(name == k or name.startswith(k) for k in kicad_names)
+
+        try:
+            import psutil
+
+            def _kicad_procs(procs: Any) -> list[Any]:
+                out = []
+                for p in procs:
+                    try:
+                        if _is_kicad(p.name()):
+                            out.append(p)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        continue
+                return out
+
+            launcher = _kicad_procs(psutil.Process().parents())[:1]
+            candidates = launcher or _kicad_procs(psutil.process_iter())
+            for proc in candidates:
+                try:
+                    found = _accept(proc.cwd())
+                    if found:
+                        logging.debug(f"cwd: found project via KiCad PID {proc.pid}: {found}")
+                        return found
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            if launcher:
+                logging.debug(f"cwd: launching KiCad PID {launcher[0].pid} has no project open")
+            return None
+        except ImportError:
+            pass
+        except Exception as e:
+            logging.debug(f"cwd scan failed: {e}")
+            return None
+
+        # Without psutil: the parent process on Linux only.
+        if platform.system() == "Linux":
+            try:
+                ppid = os.getppid()
+                comm = Path(f"/proc/{ppid}/comm").read_text().strip()
+                if _is_kicad(comm):
+                    return _accept(os.readlink(f"/proc/{ppid}/cwd"))
+            except OSError:
+                pass
+        return None
 
     @staticmethod
     def _find_project_via_process_args() -> Path | None:
